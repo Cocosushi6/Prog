@@ -163,10 +163,10 @@ def afficher_grille(filename):
     for i in range(0, width):
         for j in range(0, height):
             if grid[i, j] == 4:
-                image.putpixel((i, j), (255, 0, 0))
+                image.putpixel((i, j), (255, 255, 255))
             else:
                 pixelvalue = int((5.0 - G[i, j]) * 255 * 50)
-                image.putpixel((i, j), (pixelvalue, pixelvalue, pixelvalue))
+                image.putpixel((i, j), (0, 0, pixelvalue))
 
     image.save(filename)
 
