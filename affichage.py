@@ -3,8 +3,6 @@ from PIL import Image
 from math import log
 from ctes import *
 
-width, height = 100, 100
-
 # diff_cel : est-ce qu'on affiche les différents types de cellules (normal/tumeur/vide)
 # en différentes couleurs ou pas
 def afficher_grilleH(filename, H, grid, diff_cel=False):
@@ -25,7 +23,7 @@ def afficher_grilleH(filename, H, grid, diff_cel=False):
                     image.putpixel((i, j), (pixelvalue, pixelvalue, 0))
                 else:
                     image.putpixel((i, j), (0, pixelvalue, 0))
-            elif grid[i, j] == 0:
+            elif grid[i, j] == 1:
                 if diff_cel:
                     image.putpixel((i, j), (pixelvalue, pixelvalue, pixelvalue))
                 else:
@@ -49,7 +47,7 @@ def afficher_grilleG(filename, G, grid, diff_cel=False):
                     image.putpixel((i, j), (pixelvalue, 0, 0))
                 else:
                     image.putpixel((i, j), (0, 0, pixelvalue))
-            elif grid[i, j] == 0:
+            elif grid[i, j] == 1:
                 if diff_cel:
                     image.putpixel((i, j), (pixelvalue, pixelvalue, pixelvalue))
                 else:

@@ -16,3 +16,7 @@ G_D = 2.5 # 2.5 mM, niveau de glucose minimum pour assurer la survie d'une cellu
 G_S = 5.0 # mM, niveau par défaut de la répartition de glucose (mM = milimole par litre; autre unité courament utilisée : miligram par décilitre (cf internet pour conversion))
 H_S = 3.98e-5 # concentration en ions H+ du sérum/sang (i.e pH = 7.4)
 
+width, height = 100, 100
+
+# précision de l'algorithme SOR
+epsilon = 1e-4

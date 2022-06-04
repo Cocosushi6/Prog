@@ -2,11 +2,15 @@ from enum import Enum
 from math import log
 import random
 import sys
+import cProfile
 
 import numpy as np
 from scipy.sparse import dia_matrix, block_diag, diags
 from scipy.sparse.linalg import eigs
 from PIL import Image
+
+from numba import jit, float64, int64, void, typeof, int8
+from numba.types import UniTuple
 
 from ctes import *
 from affichage import *
@@ -17,7 +21,7 @@ from affichage import *
 # initialisation des tableaux de valeurs
 # grid contient l'état de l'automate : type des cellules, active ou non, etc.; élements de type Cell
 #grid = np.full(shape=(width, height), fill_value=3, dtype=np.int8)
-grid = np.loadtxt("vessels-noT.csv", delimiter=',', dtype=np.int8)
+grid = np.loadtxt("vessels.csv", delimiter=',', dtype=np.int8)
 #repart_aleat("vessels.csv")
 
 # H contient la valeur du pH en tout point
@@ -38,15 +42,28 @@ def repart_aleat(filename):
 
     np.savetxt(filename, grid, fmt='%1.0f', delimiter=',')
 
-# méthode de sur-relaxation successive
-def k(i, j):
+def split(grid):
+    result = np.zeros(shape=(10, width, height), dtype=np.int8)
+    # arbitrary seed, change needed
+    rng = np.random.default_rng(12498)
+    for i in range(width):
+        for j in range(height):
+            r = rng.random()
+            k = int(r * 10)
+            result[k, i, j] = grid[i, j]
+
+    return result
+
+@jit(nopython=True)
+def k(grid, i, j):
     if grid[i, j] == 2 :
         return kT
     if grid[i, j] == 3:
         return kN
     return 0
 
-def h(i, j):
+@jit(float64(int8[:, :], int64, int64), nopython=True)
+def h(grid, i, j):
     if grid[i, j] == 2:
         return H_A if E[i, j] == 1 else H_Q
     return 0
@@ -57,7 +74,8 @@ def Gl(i, j):
 def Grid(i, j):
     return grid[i % width, j % height]
 
-def residuH(i, j):
+@jit('UniTuple(float64, 2)(int8[:,:], float64[:,:], int64, int64)', nopython=True)
+def residuH(grid, H, i, j):
     above = (i % width, (j+1) % height)
     under = (i % width, (j-1) % height)
     right = ((i+1) % width, j % height)
@@ -67,33 +85,34 @@ def residuH(i, j):
         return (H[under] + H[left] + H[right] \
                 - (3 + q_H * delta / DH) * H[i, j] \
                 + ((q_H * delta)/DH) * H_S \
-                + (delta ** 2) / DH * h(i, j), (3 + q_H * delta / DH))
+                + (delta ** 2) / DH * h(grid, i, j), (3 + q_H * delta / DH))
     if grid[under] == 4:
         return (H[above] + H[left] + H[right] \
                 - (3 + (q_H * delta) / DH) * H[i, j] \
                 + ((q_H * delta)/DH) * H_S \
-                + (delta ** 2) / DH * h(i, j), (3 + q_H * delta / DH))
+                + (delta ** 2) / DH * h(grid, i, j), (3 + q_H * delta / DH))
     if grid[right] == 4:
         return (H[under] + H[left] + H[above] \
                 - (3 + (q_H * delta) / DH) * H[i, j] \
                 + ((q_H * delta)/DH) * H_S \
-                + (delta ** 2) / DH * h(i, j), (3 + q_H * delta / DH))
+                + (delta ** 2) / DH * h(grid, i, j), (3 + q_H * delta / DH))
     if grid[left] == 4:
         return (H[under] + H[above] + H[right] \
                 - (3 + (q_H * delta) / DH) * H[i, j] \
                 + ((q_H * delta)/DH) * H_S \
-                + (delta ** 2) / DH * h(i, j), (3 + q_H * delta / DH))
+                + (delta ** 2) / DH * h(grid, i, j), (3 + q_H * delta / DH))
     else:
         return (H[above] + H[under] + H[left] + H[right] \
                 - 4 * H[i, j] \
-                + (delta ** 2 / DH) * h(i, j), 4)
+                + (delta ** 2 / DH) * h(grid, i, j), 4)
 
 
 
 # EMPTY = 0, DEAD = 1, TUMOR = 2, NORMAL = 3, VESSEL = 4
 # renvoie la valeur de G à la case i, j affectée du
 # bon coefficient selon les cas où on est à côté d'un vaisseau sanguin ou non
-def residuG(i, j):
+@jit('UniTuple(float64, 2)(int8[:,:], float64[:, :], int64, int64)', nopython=True)
+def residuG(grid, G, i, j):
     above = (i % width, (j+1) % height)
     under = (i % width, (j-1) % height)
     right = ((i+1) % width, j % height)
@@ -101,31 +120,32 @@ def residuG(i, j):
 
     if grid[above] == 4:
         return (G[under] + G[left] + G[right] \
-                - (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG) * G[i, j] \
-                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG))
+                - (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG) * G[i, j] \
+                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG))
     if grid[under] == 4:
         return (G[above] + G[left] + G[right] \
-                - (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG) * G[i, j] \
-                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG))
+                - (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG) * G[i, j] \
+                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG))
     if grid[right] == 4:
         return (G[under] + G[left] + G[above] \
-                - (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG) * G[i, j] \
-                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG))
+                - (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG) * G[i, j] \
+                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG))
     if grid[left] == 4:
         return (G[under] + G[above] + G[right] \
-                - (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG) * G[i, j] \
-                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(i, j) + q_G * delta) / DG))
+                - (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG) * G[i, j] \
+                + ((q_G * delta)/DG) * G_S, (3 + ((delta ** 2) * k(grid, i, j) + q_G * delta) / DG))
     else:
         return (G[above] + G[under] + G[left] + G[right] \
-                - (4 + (delta ** 2) * k(i, j) / DG) * G[i, j], (4 + ((delta**2)*k(i, j) / DG)))
+                - (4 + (delta ** 2) * k(grid, i, j) / DG) * G[i, j], (4 + ((delta**2)*k(grid, i, j) / DG)))
 
 
 # r_jac : rayon spectral de la matrice d'itération utilisée
 # dans la méthode de Jacobi lorsque appliquée à ce système
 # max_iter : nombre maximal d'itérations avant de s'arrêter
-def sor(r_jac, tab, f_residu, max_iter=100):
+#@jit(void(float64, int8[:,:], float64[:,:], typeof(residuG), int64[:], int64[:], int64), nopython=True)
+@jit(nopython=True)
+def sor(r_jac, grid, tab, f_residu, indices_x, indices_y, max_iter=100):
     omega = 1.0
-    epsilon = 1e-4
     for n in range(1, max_iter):
         norme = 0.0
         max_res_old_fois_omega = 0
@@ -135,9 +155,11 @@ def sor(r_jac, tab, f_residu, max_iter=100):
         # dans le calcul des nouvelles valeurs
         # passe une ou passe deux
         for passe in range(1, 3):
-            j_debut = passe - 1
+            jdebut = passe - 1
             for i in range(0, width):
-                for j in range(j_debut, height, 2):
+                for j in range(jdebut, height, 2):
+#            for count in range(len(indices_x)):
+                #i, j = indices_x[count], indices_y[count]
                     # on est sur un vaisseau, pas de calculs à faire, la valeur vaut toujours G_S
                     # TODO à reconsidérer ?
                     # normalement c'est bon; dans un vaisseau, la concentration est toujours G_S;
@@ -146,9 +168,11 @@ def sor(r_jac, tab, f_residu, max_iter=100):
                     if grid[i, j] == 4 :
                         pass
                     else:
-                        res, coef = f_residu(i, j)
+                        res, coef = f_residu(grid, tab, i, j)
+                        #print(i, ", ", j, " : res : ", res, ", coef : ", coef)
                         norme += abs(res)
                         diff = omega * res / coef
+                        #print("diff : ", diff)
 
                         # TODO déteminer pourquoi c'est un + et pas un moins (bug, important)
                         # le papier indique un +, le livre Numerical Recipes l'inverse
@@ -156,9 +180,7 @@ def sor(r_jac, tab, f_residu, max_iter=100):
                         tab[i, j] += diff
                         if abs(diff) >= abs(max_res_old_fois_omega):
                             max_res_old_fois_omega = diff
-
-                # j_debut = 1 si 2 avant ou 2 si 1 avant
-                j_debut = 1 - j_debut
+                jdebut = 1 - jdebut
 
             if passe == 1 and n == 1:
                 omega = 1/(1 - r_jac * r_jac * 0.5)
@@ -177,22 +199,28 @@ def sor(r_jac, tab, f_residu, max_iter=100):
 #    np.savetxt("donnes.csv", tab, fmt='%1.6f', delimiter=',')
 
 def alent_vacants(i, j):
-    return (Grid(i+1, j) == 0 or Grid(i-1, j) == 0 or Grid(i, j+1) == 0 or Grid(i, j-1) == 0)
+    return (Grid(i+1, j) == 1 or Grid(i-1, j) == 1 or Grid(i, j+1) == 1 or Grid(i, j-1) == 1)
 
 def max_glucose(i, j):
-    d = {(i+1, j): Gl(i+1, j), \
-         (i-1, j): Gl(i-1, j), \
-         (i, j+1): Gl(i, j+1), \
-         (i, j-1): Gl(i, j-1)}
+    d = {(i+1, j): Gl(i+1, j) if Grid(i+1, j) == 1 else 0, \
+         (i-1, j): Gl(i-1, j) if Grid(i-1, j) == 1 else 0, \
+         (i, j+1): Gl(i, j+1) if Grid(i, j+1) == 1 else 0, \
+         (i, j-1): Gl(i, j-1) if Grid(i, j-1) == 1 else 0}
     return max(d, key=d.get) # cf internet
 
 # N : nombre d'itérations de l'automate
 def automate(rho_jacobi, max_iter):
-    sor(rho_jacobi, G, residuG, 1000)
+    global grid
+    global G, H, E
+    x1, y1 = np.indices((width, height))
+    x = x1.flatten()
+    y = y1.flatten()
+
+    sor(rho_jacobi, grid, G, residuG, x, y, 1000)
     afficher_grilleG("Images/testG.png", G, grid)
     np.savetxt("Data/donnesG.csv", G, fmt='%1.5f', delimiter=',')
 
-    sor(rho_jacobi, H, residuH, 1000)
+    sor(rho_jacobi, grid, H, residuH, x, y, 1000)
     afficher_grilleH("Images/testH.png", H, grid)
     np.savetxt("Data/donnesH.csv", H, fmt='%1.9f', delimiter=',')
 
@@ -200,7 +228,11 @@ def automate(rho_jacobi, max_iter):
     np.savetxt("Data/etat.csv", E, fmt='%1.0f', delimiter=',')
     np.savetxt("Data/type.csv", grid, fmt='%1.0f', delimiter=',')
 
+    # TODO ajout : try/catch KeyboardInterrupt pour charger un niveau de propagation particulier 
+    # TODO ajout : paralléliser la méthode SOR sur les partitions ? cf numba parallel=True
     for N in range(0, max_iter):
+        print("STEP : ", str(N))
+        newgrid = np.zeros(shape=grid.shape, dtype=grid.dtype)
         for i in range(0, width):
             for j in range(0, height):
                 # EMPTY = 0, DEAD = 1, TUMOR = 2, NORMAL = 3, VESSEL = 4
@@ -208,38 +240,77 @@ def automate(rho_jacobi, max_iter):
                     pH = -log(H[i, j] * 1e-3, 10) # H est en milimoles/L donc on reconverti en mol/L pour avoir le pH
 
                     # si le pH ou la concentration en glucose trop basses : mort de la cellule
-                    if pH <= (pH_D_N if grid[i, j] == 3 else pH_D_T) \
-                     or G[i, j] <= 2.5 :
-                        grid[i, j] = 0
+                    if (pH <= (pH_D_N if grid[i, j] == 3 else pH_D_T) or G[i, j] <= 2.5) :
+                        newgrid[i, j] = 1
+                        #grid[i, j] = 1
+                        E[i, j] = 0
                         print("mort cellule : ", (i, j))
 
                     # sinon, si entre les deux, état de "sommeil"
+                    # SOMMEIL = 0, ACTIF = 1
                     elif pH <= (pH_Q_N if grid[i, j] == 3 else pH_Q_T):
+                        newgrid[i, j] = grid[i, j]
                         E[i, j] = 0
                         print("mise en sommeil : ", (i, j))
 
                     # enfin, si plus haut : division et reproduction de la cellule
                     else:
+                        # le pH est + haut que les seuils, on réactive la cellule
+                        E[i, j] = 1
+                        # on crée une nouvelle cellule si possible
                         if alent_vacants(i, j):
-                            x, y = max_glucose(i, j)
-                            grid[x % width, y % height] = grid[i, j]
+                            x1, y1 = max_glucose(i, j)
+                            newgrid[x1 % width, y1 % height] = grid[i, j]
+                            #grid[x1 % width, y1 % height] = grid[i, j]
+                            # on regarde si elle est immédiatement en sommeil ou non
+                            if pH <= (pH_Q_N if newgrid[x1 % width, y1 % height] == 3 else pH_Q_T):
+                            #if pH <= (pH_Q_N if grid[x1 % width, y1 % height] == 3 else pH_Q_T):
+                                E[x1 % width, y1 % height] = 0
+                            else:
+                                E[x1 % width, y1 % height] = 1
+                        
+                        newgrid[i, j] = grid[i, j]
+                else:
+                    # si la valeur n'a pas encore été modifiée, par exemple par une naissance de cellule
+                    if newgrid[i, j] == 0:
+                        # alors on copie celle de grid
+                        newgrid[i, j] = grid[i, j]
 
-        print("étape : ", str(N))
+        grid = newgrid.copy()
 
-        sor(rho_jacobi, G, residuG, 1000)
-        afficher_grilleG("Images/testG" + str(N) + ".png", G, grid) 
-        np.savetxt("Data/donnesG" + str(N) + ".csv", G, fmt='%1.5f', delimiter=',')
-        print("SOR G fini")
+        partition = split(grid)
 
-        sor(rho_jacobi, H, residuH, 1000)
-        afficher_grilleH("Images/testH" + str(N) + ".png", H, grid) 
-        np.savetxt("Data/donnesH" + str(N) + ".csv", H, fmt='%1.9f', delimiter=',')
-        print("SOR H fini")
-        
-        afficher_etat("Images/etat" + str(N) + ".png", E, grid)
-        np.savetxt("Data/etat" + str(N) + ".csv", E, fmt='%1.0f', delimiter=',')
+        for l in range(len(partition)):
+            print("SUBSTEP : ", str(l))
 
-        np.savetxt("Data/type" + str(N) + ".csv", grid, fmt='%1.0f', delimiter=',')
+            # coordonnées x et y de toutes les cellules dans cette partition (x, y de même taille)
+            x, y = np.nonzero(partition[l])
+            print("taille partition : ", len(x))
+
+            sor(rho_jacobi, grid, G, residuG, x, y, 1000)
+            #afficher_grilleG("Images/testG" + str(N) + "-" + str(l) + ".png", G, grid)
+            #np.savetxt("Data/donnesG" + str(N) + "-" + str(l) + ".csv", G, fmt='%1.5f', delimiter=',')
+            print("SOR G fini")
+    
+            sor(rho_jacobi, grid, H, residuH, x, y, 1000)
+            #afficher_grilleH("Images/testH" + str(N) + "-" + str(l) + ".png", H, grid) 
+            #np.savetxt("Data/donnesH" + str(N) + "-" + str(l) + ".csv", H, fmt='%1.9f', delimiter=',')
+            print("SOR H fini")
+            
+            #afficher_etat("Images/etat" + str(N) + "-" + str(l) + ".png", E, grid)
+            #np.savetxt("Data/etat" + str(N) + "-" + str(l) + ".csv", E, fmt='%1.0f', delimiter=',')
+            #np.savetxt("Data/type" + str(N) + "-" + str(l) + ".csv", grid, fmt='%1.0f', delimiter=',')
+
+        l = 0
+        afficher_grilleG("Images/testG" + str(N) + "-" + str(l) + ".png", G, grid)
+        np.savetxt("Data/donnesG" + str(N) + "-" + str(l) + ".csv", G, fmt='%1.5f', delimiter=',')
+        afficher_grilleH("Images/testH" + str(N) + "-" + str(l) + ".png", H, grid) 
+        np.savetxt("Data/donnesH" + str(N) + "-" + str(l) + ".csv", H, fmt='%1.9f', delimiter=',')
+        afficher_etat("Images/etat" + str(N) + "-" + str(l) + ".png", E, grid)
+        np.savetxt("Data/etat" + str(N) + "-" + str(l) + ".csv", E, fmt='%1.0f', delimiter=',')
+        np.savetxt("Data/type" + str(N) + "-" + str(l) + ".csv", grid, fmt='%1.0f', delimiter=',')
+
+
 
 # préparation de l'automate
 # construction de la matrice éparse du système et détermination du rayon spectral de Jacobi
@@ -256,9 +327,16 @@ mat_iter = (-invD) * (L + U)
 # calcul du rayon spectral de la matrice (module de la vp la plus grande)
 # ce rayon est nécessairement inférieur à 1;
 # de plus, plus la grille est grande, plus il se rapproche de 1
+# explication des paramètres : 
+# k : nombre de valeurs propres demandées
+# which : catégorie de valeurs propres désirées : LM = largest magnitude (i.e celles de module maximal)
+# return_eigenvectors : veut-on les vecteurs propres avec ?
 rho_jacobi = abs(eigs(mat_iter, k=1, which='LM', return_eigenvectors=False)[0])
 print(rho_jacobi)
 
 #sor(rho_jacobi, H, residuH, 1000)
 
-automate(rho_jacobi, 20)
+# cProfile.run("automate(rho_jacobi, 20)")
+automate(rho_jacobi, 40)
+
+print("Simulation terminée")

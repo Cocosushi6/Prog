@@ -1,2 +1,7 @@
 Images/
+Data/
 __pycache__/
+.numba_config.yaml
+out.log
+out2.log
+test*.csv
